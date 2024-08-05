@@ -1,3 +1,19 @@
+#!/usr/bin/env python
+
+# Copyright 2024 Columbia Artificial Intelligence, Robotics Lab,
+# and The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from dataclasses import dataclass, field
 
 
@@ -10,21 +26,31 @@ class DiffusionConfig:
     The parameters you will most likely need to change are the ones which depend on the environment / sensors.
     Those are: `input_shapes` and `output_shapes`.
 
+    Notes on the inputs and outputs:
+        - "observation.state" is required as an input key.
+        - Either:
+            - At least one key starting with "observation.image is required as an input.
+              AND/OR
+            - The key "observation.environment_state" is required as input.
+        - If there are multiple keys beginning with "observation.image" they are treated as multiple camera
+          views. Right now we only support all images having the same shape.
+        - "action" is required as an output key.
+
     Args:
         n_obs_steps: Number of environment steps worth of observations to pass to the policy (takes the
             current step and additional steps going back).
         horizon: Diffusion model action prediction size as detailed in `DiffusionPolicy.select_action`.
         n_action_steps: The number of action steps to run in the environment for one invocation of the policy.
             See `DiffusionPolicy.select_action` for more details.
-        input_shapes: A dictionary defining the shapes of the input data for the policy.
-            The key represents the input data name, and the value is a list indicating the dimensions
-            of the corresponding data. For example, "observation.image" refers to an input from
-            a camera with dimensions [3, 96, 96], indicating it has three color channels and 96x96 resolution.
-            Importantly, shapes doesnt include batch dimension or temporal dimension.
-        output_shapes: A dictionary defining the shapes of the output data for the policy.
-            The key represents the output data name, and the value is a list indicating the dimensions
-            of the corresponding data. For example, "action" refers to an output shape of [14], indicating
-            14-dimensional actions. Importantly, shapes doesnt include batch dimension or temporal dimension.
+        input_shapes: A dictionary defining the shapes of the input data for the policy. The key represents
+            the input data name, and the value is a list indicating the dimensions of the corresponding data.
+            For example, "observation.image" refers to an input from a camera with dimensions [3, 96, 96],
+            indicating it has three color channels and 96x96 resolution. Importantly, `input_shapes` doesn't
+            include batch dimension or temporal dimension.
+        output_shapes: A dictionary defining the shapes of the output data for the policy. The key represents
+            the output data name, and the value is a list indicating the dimensions of the corresponding data.
+            For example, "action" refers to an output shape of [14], indicating 14-dimensional actions.
+            Importantly, `output_shapes` doesn't include batch dimension or temporal dimension.
         input_normalization_modes: A dictionary with key representing the modality (e.g. "observation.state"),
             and the value specifies the normalization mode to apply. The two available modes are "mean_std"
             which subtracts the mean and divides by the standard deviation and "min_max" which rescale in a
@@ -132,15 +158,33 @@ class DiffusionConfig:
             raise ValueError(
                 f"`vision_backbone` must be one of the ResNet variants. Got {self.vision_backbone}."
             )
-        if (
-            self.crop_shape[0] > self.input_shapes["observation.image"][1]
-            or self.crop_shape[1] > self.input_shapes["observation.image"][2]
-        ):
-            raise ValueError(
-                f'`crop_shape` should fit within `input_shapes["observation.image"]`. Got {self.crop_shape} '
-                f'for `crop_shape` and {self.input_shapes["observation.image"]} for '
-                '`input_shapes["observation.image"]`.'
-            )
+
+        image_keys = {k for k in self.input_shapes if k.startswith("observation.image")}
+
+        if len(image_keys) == 0 and "observation.environment_state" not in self.input_shapes:
+            raise ValueError("You must provide at least one image or the environment state among the inputs.")
+
+        if len(image_keys) > 0:
+            if self.crop_shape is not None:
+                for image_key in image_keys:
+                    if (
+                        self.crop_shape[0] > self.input_shapes[image_key][1]
+                        or self.crop_shape[1] > self.input_shapes[image_key][2]
+                    ):
+                        raise ValueError(
+                            f"`crop_shape` should fit within `input_shapes[{image_key}]`. Got {self.crop_shape} "
+                            f"for `crop_shape` and {self.input_shapes[image_key]} for "
+                            "`input_shapes[{image_key}]`."
+                        )
+            # Check that all input images have the same shape.
+            first_image_key = next(iter(image_keys))
+            for image_key in image_keys:
+                if self.input_shapes[image_key] != self.input_shapes[first_image_key]:
+                    raise ValueError(
+                        f"`input_shapes[{image_key}]` does not match `input_shapes[{first_image_key}]`, but we "
+                        "expect all image shapes to match."
+                    )
+
         supported_prediction_types = ["epsilon", "sample"]
         if self.prediction_type not in supported_prediction_types:
             raise ValueError(
